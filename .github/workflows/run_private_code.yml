@@ -1,221 +1,58 @@
-name: run-private-code
+name: Run private main.py (public repo only)
 
 on:
-  
-  workflow_dispatch: {}
-
+  workflow_dispatch:
+    inputs:
+      REF:
+        description: "Branch/Tag của repo riêng tư"
+        required: true
+        default: "main"
+      FILE_PATH:
+        description: "Đường dẫn tới main.py trong repo riêng tư"
+        required: true
+        default: "src/main.py"
+      PYTHON_VERSION:
+        description: "Python version để chạy"
+        required: true
+        default: "3.10"
 
 jobs:
-  run-private:
+  run-main:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    concurrency:
-      group: run-private-${{ github.ref }}
-      cancel-in-progress: false
-
-    env:
-    
+    timeout-minutes: 360
+    permissions: {}   # dùng PAT riêng để checkout repo private
     steps:
-      - name: Checkout wrapper (repo PUBLIC)
+      - name: Checkout (public repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout (private repo, sparse to 1 file)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-
-      # Quyết định mode auth (không dùng secrets trực tiếp trong if)
-      - name: Determine auth mode
-        id: auth
-        env:
-          HAS_PAT: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          HAS_SSH: ${{ secrets.PRIVATE_SSH_KEY }}
-        run: |
-          if [ -n "$HAS_PAT" ]; then
-            echo "mode=pat" >> "$GITHUB_OUTPUT"
-          elif [ -n "$HAS_SSH" ]; then
-            echo "mode=ssh" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=none" >> "$GITHUB_OUTPUT"
-          fi
-
-      # >>> FIX LỖI INPUTS KHI CHẠY THEO LỊCH <<<
-      - name: Resolve parameters (support schedule without inputs)
-        id: params
-        run: |
-          repo="${{ inputs.private_repo }}"; [ -z "$repo" ] && repo="audreykft2qlbp1duqldp-del/hoanthien"; echo "repo=$repo" >> "$GITHUB_OUTPUT"
-          ref="${{ inputs.private_ref }}";   [ -z "$ref" ] && ref="main";                                           echo "ref=$ref"   >> "$GITHUB_OUTPUT"
-          wd="${{ inputs.workdir }}";        [ -z "$wd" ]  && wd=".";                                               echo "workdir=$wd" >> "$GITHUB_OUTPUT"
-          
-
-
-      # KÉO CODE từ repo PRIVATE (PAT)
-      - name: Checkout PRIVATE via PAT
-        if: ${{ steps.auth.outputs.mode == 'pat' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.params.outputs.repo }}
-          ref: ${{ steps.params.outputs.ref }}
-          path: private-src
-          fetch-depth: 1
+          repository: audreykft2qlbp1duqldp-del/hoanthien   # ← ĐỔI
+          ref: ${{ inputs.REF }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          persist-credentials: false
-
-      # KÉO CODE từ repo PRIVATE (SSH)
-      - name: Checkout PRIVATE via SSH Deploy Key
-        if: ${{ steps.auth.outputs.mode == 'ssh' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.params.outputs.repo }}
-          ref: ${{ steps.params.outputs.ref }}
           path: private-src
           fetch-depth: 1
-          ssh-key: ${{ secrets.PRIVATE_SSH_KEY }}
-          persist-credentials: false
+          # Chỉ lấy đúng 1 file (cần tắt cone mode để match file)
+          sparse-checkout: |
+            ${{ inputs.FILE_PATH }}
+          sparse-checkout-cone: false
 
-      - name: Fail if no auth available
-        if: ${{ steps.auth.outputs.mode == 'none' }}
-        run: |
-          echo "::error::Không checkout được repo private. Cần PRIVATE_REPO_TOKEN (PAT) hoặc PRIVATE_SSH_KEY (Deploy key)."
-          exit 1
-
-      - name: Verify PRIVATE checkout
-        working-directory: private-src
-        run: |
-          pwd && ls -la
-          echo "== 20 files in commit =="
-          git ls-tree -r --name-only HEAD | head -n 20
-
-      # Tự tìm thư mục chứa src/main.py (kể cả khi không nhập workdir)
-      - name: Detect script path
-        id: find_script
-        run: |
-          set -e
-          BASE="private-src"
-          DEFAULT="${{ steps.params.outputs.workdir }}"
-          CAND=""
-          if [ -n "$DEFAULT" ] && [ -f "$BASE/$DEFAULT/src/main.py" ]; then
-            CAND="$BASE/$DEFAULT"
-          else
-            CAND=$(cd "$BASE" && find . -type f -path "*/src/main.py" -print -quit | sed 's|^\./||' | xargs -I{} dirname {} )
-            [ -n "$CAND" ] && CAND="$BASE/$CAND"
-          fi
-          if [ -z "$CAND" ]; then
-            echo "::error::Không tìm thấy src/main.py trong repo private."
-            exit 1
-          fi
-          echo "dir=$CAND" >> "$GITHUB_OUTPUT"
-          echo "[FOUND] $CAND"
-
-      
-
-
-      - name: Setup Python 3.11
+      - name: Setup Python ${{ inputs.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ inputs.PYTHON_VERSION }}
 
-      - name: Install system deps (ffmpeg)
+      - name: Run main.py từ repo riêng tư
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('private-src/**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install Python deps
-        run: |
-          set -e
-          REQ=$(ls private-src/**/requirements*.txt 2>/dev/null | head -n1 || true)
-          if [ -n "$REQ" ]; then
-            echo "[INFO] Using requirements: $REQ"
-            pip install -r "$REQ"
-          else
-            echo "[INFO] No requirements*.txt found — install tối thiểu"
-            pip install Pillow opencv-python-headless numpy gdown \
-                        google-api-python-client google-auth google-auth-httplib2 \
-                        imageio-ffmpeg
+          set -euo pipefail
+          FILE="private-src/${{ inputs.FILE_PATH }}"
+          if [[ ! -f "$FILE" ]]; then
+            echo "::error::Không tìm thấy file: $FILE"
+            ls -la private-src || true
+            exit 1
           fi
 
-      # CHẠY CODE trong repo PRIVATE (upload YouTube trực tiếp)
-      - name: Run pipeline in PRIVATE
-        working-directory: ${{ steps.find_script.outputs.dir }}
-        run: |
-          set -e
-          python -u src/main.py
-
-      # Commit & PUSH 3 CSV về repo PRIVATE qua PAT (nếu checkout bằng PAT)
-      - name: Commit & push state CSVs back to PRIVATE (PAT)
-        if: ${{ steps.auth.outputs.mode == 'pat' }}
-        working-directory: private-src
-        env:
-          PUSH_TOKEN_1: ${{ secrets.PRIVATE_REPO_PUSH_TOKEN }}
-          PUSH_TOKEN_2: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          PRIVATE_REPO: ${{ steps.params.outputs.repo }}
-          PRIVATE_REF: ${{ steps.params.outputs.ref }}
-          DIR_FOUND: ${{ steps.find_script.outputs.dir }}
-        run: |
-          set -e
-          TOKEN="${PUSH_TOKEN_1:-$PUSH_TOKEN_2}"
-          [ -z "$TOKEN" ] && { echo "::warning::Không có token có quyền ghi. Bỏ qua commit."; exit 0; }
-
-          FILES=""
-          for f in tieudedalay.csv; do
-            [ -f "$f" ] && FILES="$FILES $f"
-            [ -n "$DIR_FOUND" ] && [ -f "$DIR_FOUND/$f" ] && FILES="$FILES $DIR_FOUND/$f"
-          done
-          [ -z "$FILES" ] && { echo "[INFO] Không có CSV để commit."; exit 0; }
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${PRIVATE_REPO}.git"
-
-          CURBR=$(git rev-parse --abbrev-ref HEAD || true)
-          [ "$CURBR" = "HEAD" ] && git checkout -b ci-state-update
-
-          git add -- $FILES
-          git diff --cached --quiet && { echo "[INFO] Không có thay đổi."; exit 0; }
-          git commit -m "ci(state): update tieudedalay.csv"
-          git push origin HEAD:"${PRIVATE_REF}"
-
-      # Commit & PUSH 3 CSV về repo PRIVATE qua SSH (nếu checkout bằng SSH)
-      - name: Commit & push state CSVs back to PRIVATE (SSH)
-        if: ${{ steps.auth.outputs.mode == 'ssh' }}
-        working-directory: private-src
-        env:
-          PRIVATE_SSH_KEY: ${{ secrets.PRIVATE_SSH_KEY }}
-          PRIVATE_REPO: ${{ steps.params.outputs.repo }}
-          PRIVATE_REF: ${{ steps.params.outputs.ref }}
-          DIR_FOUND: ${{ steps.find_script.outputs.dir }}
-        run: |
-          set -e
-          [ -z "$PRIVATE_SSH_KEY" ] && { echo "::warning::Thiếu PRIVATE_SSH_KEY. Bỏ qua commit."; exit 0; }
-
-          install -m 700 -d ~/.ssh
-          echo "$PRIVATE_SSH_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          eval "$(ssh-agent -s)"
-          ssh-add ~/.ssh/id_deploy
-          printf "Host github.com\n  StrictHostKeyChecking accept-new\n" >> ~/.ssh/config
-
-          FILES=""
-          for f in tieudedalay.csv; do
-            [ -f "$f" ] && FILES="$FILES $f"
-            [ -n "$DIR_FOUND" ] && [ -f "$DIR_FOUND/$f" ] && FILES="$FILES $DIR_FOUND/$f"
-          done
-          [ -z "$FILES" ] && { echo "[INFO] Không có CSV để commit."; exit 0; }
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "git@github.com:${PRIVATE_REPO}.git"
-
-          CURBR=$(git rev-parse --abbrev-ref HEAD || true)
-          [ "$CURBR" = "HEAD" ] && git checkout -b ci-state-update
-
-          git add -- $FILES
-          git diff --cached --quiet && { echo "[INFO] Không có thay đổi."; exit 0; }
-          git commit -m "ci(state): update promptdalay.csv, links_done.csv, tieudedalay.csv"
-          git push origin HEAD:"${PRIVATE_REF}"
+          echo "[INFO] Running: $FILE"
+          python "$FILE"
