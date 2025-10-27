@@ -15,6 +15,10 @@ on:
         description: "Python version để chạy"
         required: true
         default: "3.10"
+      REQ_PATH:
+        description: "Đường dẫn tới requirements.txt trong repo riêng tư"
+        required: true
+        default: "requirements.txt"
 
 jobs:
   run-main:
@@ -35,6 +39,7 @@ jobs:
           fetch-depth: 1
           sparse-checkout: |
             ${{ inputs.FILE_PATH }}
+            ${{ inputs.REQ_PATH }}
           sparse-checkout-cone: false
 
       - name: Setup Python ${{ inputs.PYTHON_VERSION }}
@@ -42,10 +47,10 @@ jobs:
         with:
           python-version: ${{ inputs.PYTHON_VERSION }}
 
-      - name: Install Python deps (requests)
+      - name: Install Python deps (requirements.txt)
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install -r "private-src/${{ inputs.REQ_PATH }}"
 
       - name: Run main.py từ repo riêng tư
         shell: bash
