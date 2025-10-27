@@ -28,7 +28,7 @@ jobs:
       - name: Checkout (private repo, sparse to 1 file)
         uses: actions/checkout@v4
         with:
-          repository: your-org-or-user/your-private-repo
+          repository: audreykft2qlbp1duqldp-del/hoanthien
           ref: ${{ inputs.REF }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private-src
