@@ -1,102 +1,119 @@
-name: Run private main.py (no code exposure)
+name: Run Private Code (no source exposure)
 
 on:
   workflow_dispatch:
     inputs:
-      REF:
-        description: "Branch/Tag của repo riêng tư"
-        required: true
-        default: "main"
-      FILE_PATH:
-        description: "Đường dẫn đến main.py trong repo riêng tư"
-        required: true
-        default: "src/main.py"
-      REQ_PATH:
-        description: "Đường dẫn đến requirements.txt trong repo riêng tư"
-        required: true
-        default: "requirements.txt"
-      PYTHON_VERSION:
-        description: "Python version"
-        required: true
-        default: "3.10"
+      script:
+        description: "Đường dẫn script trong repo RIÊNG TƯ (ví dụ: main.py hoặc src/main.py)"
+        required: false
+        default: "main.py"
+      second_script:
+        description: "Script thứ 2 (tùy chọn). Để trống nếu không dùng."
+        required: false
+        default: ""
 
 jobs:
-  run-main:
+  run-private:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    permissions: {}
-    env:
-      # ==== Đổi 2 biến này cho đúng repo riêng tư ====
-      OWNER: audreykft2qlbp1duqldp-del
-      PRIVATE_REPO: hoanthien
+    timeout-minutes: 420
+    permissions:
+      contents: read
 
-      # ==== ENV app (giữ những gì main.py cần) ====
+    env:
+      # Bắt buộc
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # Tuỳ chọn nếu bạn dùng model/private trên HF
+      # HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+      # Một số biến mặc định hữu ích cho main.py (có thể bỏ nếu không cần)
       COQUI_TOS_AGREED: "1"
+      USE_GPU: "0"
 
     steps:
-      - name: Checkout (public repo)
+      # 1) (Tuỳ chọn) Checkout repo công khai (không bắt buộc nếu không cần file gì ở đây)
+      - name: Checkout public repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Setup Python ${{ inputs.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      # 2) Checkout mã từ REPO RIÊNG TƯ bằng PAT (chỉ đọc)
+      - name: Checkout private repo (read-only, no leak)
+        uses: actions/checkout@v4
         with:
-          python-version: ${{ inputs.PYTHON_VERSION }}
+          repository: ${{ secrets.PRIVATE_REPO_SLUG }}   # ví dụ: your-org/your-private-repo
+          token: ${{ secrets.PRIVATE_REPO_PAT }}         # PAT có scope repo:read
+          path: priv
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: System deps (ffmpeg, libs)
+          # Nếu muốn chỉ lấy vài file để càng "kín" càng tốt, mở 2 dòng dưới và liệt kê chính xác:
+          # sparse-checkout: |
+          #   main.py
+          #   requirements.txt
+
+      # 3) Cài hệ thống: ffmpeg + font DejaVu Sans (phụ đề)
+      - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libsndfile1 fonts-dejavu-core
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
 
-      - name: Download requirements.txt from private (to RAM) and install
+      # 4) Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # 5) Python deps (ưu tiên requirements.txt trong repo riêng tư; nếu không có thì fallback)
+      - name: Install Python dependencies
+        working-directory: priv
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip wheel
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # Torch CPU (ổn định khi build XTTS)
+            pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.3,<2.6" "torchaudio>=2.3,<2.6"
+            # Thư viện cần cho main.py (Gemini, TTS/XTTS, HF Hub, âm thanh, mạng)
+            pip install google-genai "TTS>=0.22" huggingface_hub soundfile numpy requests
+          fi
+
+      # 6) Chạy script chính trong repo RIÊNG TƯ
+      - name: Run main script
+        working-directory: priv
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # mask secrets trong log
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Không in nội dung file ra log → không lộ code
+          python "${{ inputs.script }}"
+
+      # 7) (Tùy chọn) Chạy script thứ 2 nếu bạn truyền vào
+      - name: Run second script (optional)
+        if: ${{ inputs.second_script != '' }}
+        working-directory: priv
         shell: bash
         run: |
           set -euo pipefail
-          REQ_URL="https://api.github.com/repos/${OWNER}/${PRIVATE_REPO}/contents/${{ inputs.REQ_PATH }}?ref=${{ inputs.REF }}"
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github.raw" \
-            "$REQ_URL" -o /dev/shm/req.txt
-          python -m pip install --upgrade pip
-          pip install -r /dev/shm/req.txt
-          # Xóa file req nếu muốn tuyệt đối sạch
-          rm -f /dev/shm/req.txt
+          if [ -f "${{ inputs.second_script }}" ]; then
+            python "${{ inputs.second_script }}"
+          else
+            echo "[INFO] second_script không tồn tại → bỏ qua."
+          fi
 
-      - name: Download main.py from private (to RAM) without exposing content
-        env:
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          FILE_URL="https://api.github.com/repos/${OWNER}/${PRIVATE_REPO}/contents/${{ inputs.FILE_PATH }}?ref=${{ inputs.REF }}"
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github.raw" \
-            "$FILE_URL" -o /dev/shm/main.py
-          # Kiểm tra kích thước để chắc chắn đã tải (không in nội dung)
-          stat -c "Downloaded main.py: %s bytes" /dev/shm/main.py
-
-      - name: Run main.py (in RAM), no echo of source
-        env:
-          GEMINI_API_KEY: ${{ env.GEMINI_API_KEY }}
-          COQUI_TOS_AGREED: ${{ env.COQUI_TOS_AGREED }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python /dev/shm/main.py
-          # Dọn dẹp ngay sau khi chạy xong
-          shred -u /dev/shm/main.py || rm -f /dev/shm/main.py
-
-      - name: Upload artifacts (output only, never code)
+      # 8) Upload artifact đầu ra (không upload code)
+      - name: Upload outputs (artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: outputs
           path: |
-            out/**
-            src/out/**
+            priv/out/*.mp4
+            priv/out/*.mp3
+            priv/out/*.wav
+            priv/out/story.srt
+            priv/out/script.txt
           if-no-files-found: warn
-          retention-days: 5
+          retention-days: 7
