@@ -6,7 +6,7 @@ on:
       script:
         description: "Đường dẫn script trong repo RIÊNG TƯ (ví dụ: main.py hoặc src/main.py)"
         required: false
-        default: "main.py"
+        default: "src/main.py"
       second_script:
         description: "Script thứ 2 (tùy chọn). Để trống nếu không dùng."
         required: false
