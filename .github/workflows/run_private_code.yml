@@ -65,18 +65,25 @@ jobs:
 
       # 5) Python deps (ưu tiên requirements.txt trong repo riêng tư; nếu không có thì fallback)
       - name: Install Python dependencies
-        working-directory: priv
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip wheel
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            # Torch CPU (ổn định khi build XTTS)
-            pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.3,<2.6" "torchaudio>=2.3,<2.6"
-            # Thư viện cần cho main.py (Gemini, TTS/XTTS, HF Hub, âm thanh, mạng)
-            pip install google-genai "TTS>=0.22" huggingface_hub soundfile numpy requests
-          fi
+      working-directory: priv
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip wheel
+
+        # 1) Cài Torch (CPU) trước cho chắc, XTTS cần torch
+        pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.3,<2.6" "torchaudio>=2.3,<2.6"
+
+        # 2) Nếu có requirements.txt thì cài trước
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+
+        # 3) ĐẢM BẢO có TTS (coqui-tts). Nếu thiếu thì cài bổ sung.
+        if ! python -c "import TTS" >/dev/null 2>&1; then
+          pip install --no-cache-dir "TTS>=0.22,<0.23" soundfile huggingface_hub google-genai numpy requests
+        fi
+
 
       # 6) Chạy script chính trong repo RIÊNG TƯ
       - name: Run main script
