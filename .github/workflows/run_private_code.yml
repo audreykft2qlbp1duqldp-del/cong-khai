@@ -1,4 +1,4 @@
-name: Run private main.py (public repo only)
+name: Run private main.py (no code exposure)
 
 on:
   workflow_dispatch:
@@ -8,59 +8,95 @@ on:
         required: true
         default: "main"
       FILE_PATH:
-        description: "Đường dẫn tới main.py trong repo riêng tư"
+        description: "Đường dẫn đến main.py trong repo riêng tư"
         required: true
         default: "src/main.py"
-      PYTHON_VERSION:
-        description: "Python version để chạy"
-        required: true
-        default: "3.10"
       REQ_PATH:
-        description: "Đường dẫn tới requirements.txt trong repo riêng tư"
+        description: "Đường dẫn đến requirements.txt trong repo riêng tư"
         required: true
         default: "requirements.txt"
+      PYTHON_VERSION:
+        description: "Python version"
+        required: true
+        default: "3.10"
 
 jobs:
   run-main:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions: {}
+    env:
+      # ==== Đổi 2 biến này cho đúng repo riêng tư ====
+      OWNER: audreykft2qlbp1duqldp-del
+      PRIVATE_REPO: hoanthien
+
+      # ==== ENV app (giữ những gì main.py cần) ====
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      COQUI_TOS_AGREED: "1"
+
     steps:
       - name: Checkout (public repo)
         uses: actions/checkout@v4
-
-      - name: Checkout (private repo, sparse to 1 file)
-        uses: actions/checkout@v4
         with:
-          repository: audreykft2qlbp1duqldp-del/hoanthien
-          ref: ${{ inputs.REF }}
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: private-src
           fetch-depth: 1
-          sparse-checkout: |
-            ${{ inputs.FILE_PATH }}
-            ${{ inputs.REQ_PATH }}
-          sparse-checkout-cone: false
 
       - name: Setup Python ${{ inputs.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.PYTHON_VERSION }}
 
-      - name: Install Python deps (requirements.txt)
+      - name: System deps (ffmpeg, libs)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r "private-src/${{ inputs.REQ_PATH }}"
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1 fonts-dejavu-core
 
-      - name: Run main.py từ repo riêng tư
+      - name: Download requirements.txt from private (to RAM) and install
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          FILE="private-src/${{ inputs.FILE_PATH }}"
-          if [[ ! -f "$FILE" ]]; then
-            echo "::error::Không tìm thấy file: $FILE"
-            ls -la private-src || true
-            exit 1
-          fi
-          echo "[INFO] Running: $FILE"
-          python "$FILE"
+          REQ_URL="https://api.github.com/repos/${OWNER}/${PRIVATE_REPO}/contents/${{ inputs.REQ_PATH }}?ref=${{ inputs.REF }}"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" \
+            "$REQ_URL" -o /dev/shm/req.txt
+          python -m pip install --upgrade pip
+          pip install -r /dev/shm/req.txt
+          # Xóa file req nếu muốn tuyệt đối sạch
+          rm -f /dev/shm/req.txt
+
+      - name: Download main.py from private (to RAM) without exposing content
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE_URL="https://api.github.com/repos/${OWNER}/${PRIVATE_REPO}/contents/${{ inputs.FILE_PATH }}?ref=${{ inputs.REF }}"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" \
+            "$FILE_URL" -o /dev/shm/main.py
+          # Kiểm tra kích thước để chắc chắn đã tải (không in nội dung)
+          stat -c "Downloaded main.py: %s bytes" /dev/shm/main.py
+
+      - name: Run main.py (in RAM), no echo of source
+        env:
+          GEMINI_API_KEY: ${{ env.GEMINI_API_KEY }}
+          COQUI_TOS_AGREED: ${{ env.COQUI_TOS_AGREED }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python /dev/shm/main.py
+          # Dọn dẹp ngay sau khi chạy xong
+          shred -u /dev/shm/main.py || rm -f /dev/shm/main.py
+
+      - name: Upload artifacts (output only, never code)
+        uses: actions/upload-artifact@v4
+        with:
+          name: outputs
+          path: |
+            out/**
+            src/out/**
+          if-no-files-found: warn
+          retention-days: 5
