@@ -20,7 +20,7 @@ jobs:
   run-main:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    permissions: {}   # dùng PAT riêng để checkout repo private
+    permissions: {}
     steps:
       - name: Checkout (public repo)
         uses: actions/checkout@v4
@@ -28,12 +28,11 @@ jobs:
       - name: Checkout (private repo, sparse to 1 file)
         uses: actions/checkout@v4
         with:
-          repository: audreykft2qlbp1duqldp-del/hoanthien   # ← ĐỔI
+          repository: your-org-or-user/your-private-repo
           ref: ${{ inputs.REF }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private-src
           fetch-depth: 1
-          # Chỉ lấy đúng 1 file (cần tắt cone mode để match file)
           sparse-checkout: |
             ${{ inputs.FILE_PATH }}
           sparse-checkout-cone: false
@@ -42,6 +41,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.PYTHON_VERSION }}
+
+      - name: Install Python deps (requests)
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
       - name: Run main.py từ repo riêng tư
         shell: bash
@@ -53,6 +57,5 @@ jobs:
             ls -la private-src || true
             exit 1
           fi
-
           echo "[INFO] Running: $FILE"
           python "$FILE"
