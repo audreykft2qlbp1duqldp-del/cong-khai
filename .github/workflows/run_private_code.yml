@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.PRIVATE_REPO_SLUG }}   # ví dụ: your-org/your-private-repo
-          token: ${{ secrets.PRIVATE_REPO_PAT }}         # PAT có scope repo:read
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}         # PAT có scope repo:read
           path: priv
           fetch-depth: 1
           persist-credentials: false
