@@ -1,126 +1,225 @@
-name: Run Private Code (no source exposure)
+name: run-private-code
 
 on:
-  workflow_dispatch:
-    inputs:
-      script:
-        description: "Đường dẫn script trong repo RIÊNG TƯ (ví dụ: main.py hoặc src/main.py)"
-        required: false
-        default: "src/main.py"
-      second_script:
-        description: "Script thứ 2 (tùy chọn). Để trống nếu không dùng."
-        required: false
-        default: ""
+ 
+  workflow_dispatch: {}
+
 
 jobs:
   run-private:
     runs-on: ubuntu-latest
-    timeout-minutes: 420
     permissions:
       contents: read
+    concurrency:
+      group: run-private-${{ github.ref }}
+      cancel-in-progress: false
 
     env:
-      # Bắt buộc
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      # Tuỳ chọn nếu bạn dùng model/private trên HF
-      # HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
-
-      # Một số biến mặc định hữu ích cho main.py (có thể bỏ nếu không cần)
-      COQUI_TOS_AGREED: "1"
-      USE_GPU: "0"
 
     steps:
-      # 1) (Tuỳ chọn) Checkout repo công khai (không bắt buộc nếu không cần file gì ở đây)
-      - name: Checkout public repo
+      - name: Checkout wrapper (repo PUBLIC)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # 2) Checkout mã từ REPO RIÊNG TƯ bằng PAT (chỉ đọc)
-      - name: Checkout private repo (read-only, no leak)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ secrets.PRIVATE_REPO_SLUG }}   # ví dụ: your-org/your-private-repo
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}         # PAT có scope repo:read
-          path: priv
-          fetch-depth: 1
-          persist-credentials: false
-
-          # Nếu muốn chỉ lấy vài file để càng "kín" càng tốt, mở 2 dòng dưới và liệt kê chính xác:
-          # sparse-checkout: |
-          #   main.py
-          #   requirements.txt
-
-      # 3) Cài hệ thống: ffmpeg + font DejaVu Sans (phụ đề)
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
-
-      # 4) Python
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      # 5) Python deps (ưu tiên requirements.txt trong repo riêng tư; nếu không có thì fallback)
-      - name: Install Python dependencies
-      working-directory: priv
-      shell: bash
-      run: |
-        set -euo pipefail
-        python -m pip install --upgrade pip wheel
-
-        # 1) Cài Torch (CPU) trước cho chắc, XTTS cần torch
-        pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.3,<2.6" "torchaudio>=2.3,<2.6"
-
-        # 2) Nếu có requirements.txt thì cài trước
-        if [ -f requirements.txt ]; then
-          pip install -r requirements.txt
-        fi
-
-        # 3) ĐẢM BẢO có TTS (coqui-tts). Nếu thiếu thì cài bổ sung.
-        if ! python -c "import TTS" >/dev/null 2>&1; then
-          pip install --no-cache-dir "TTS>=0.22,<0.23" soundfile huggingface_hub google-genai numpy requests
-        fi
-
-
-      # 6) Chạy script chính trong repo RIÊNG TƯ
-      - name: Run main script
-        working-directory: priv
-        shell: bash
+      # Quyết định mode auth (không dùng secrets trực tiếp trong if)
+      - name: Determine auth mode
+        id: auth
         env:
-          # mask secrets trong log
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+          HAS_PAT: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          HAS_SSH: ${{ secrets.PRIVATE_SSH_KEY }}
         run: |
-          set -euo pipefail
-          # Không in nội dung file ra log → không lộ code
-          python "${{ inputs.script }}"
-
-      # 7) (Tùy chọn) Chạy script thứ 2 nếu bạn truyền vào
-      - name: Run second script (optional)
-        if: ${{ inputs.second_script != '' }}
-        working-directory: priv
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f "${{ inputs.second_script }}" ]; then
-            python "${{ inputs.second_script }}"
+          if [ -n "$HAS_PAT" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          elif [ -n "$HAS_SSH" ]; then
+            echo "mode=ssh" >> "$GITHUB_OUTPUT"
           else
-            echo "[INFO] second_script không tồn tại → bỏ qua."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
           fi
 
-      # 8) Upload artifact đầu ra (không upload code)
-      - name: Upload outputs (artifacts)
-        uses: actions/upload-artifact@v4
+      # >>> FIX LỖI INPUTS KHI CHẠY THEO LỊCH <<<
+      - name: Resolve parameters (support schedule without inputs)
+        id: params
+        run: |
+          repo="${{ inputs.private_repo }}"; [ -z "$repo" ] && repo="audreykft2qlbp1duqldp-del/hoanthien"; echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          ref="${{ inputs.private_ref }}";   [ -z "$ref" ] && ref="main";                                           echo "ref=$ref"   >> "$GITHUB_OUTPUT"
+          wd="${{ inputs.workdir }}";        [ -z "$wd" ]  && wd=".";                                               echo "workdir=$wd" >> "$GITHUB_OUTPUT"
+          privacy="${{ inputs.youtube_privacy }}"; [ -z "$privacy" ] && privacy="public";                           echo "privacy=$privacy" >> "$GITHUB_OUTPUT"
+
+      - name: Export resolved privacy to env
+        run: echo "YOUTUBE_PRIVACY=${{ steps.params.outputs.privacy }}" >> "$GITHUB_ENV"
+
+
+      # KÉO CODE từ repo PRIVATE (PAT)
+      - name: Checkout PRIVATE via PAT
+        if: ${{ steps.auth.outputs.mode == 'pat' }}
+        uses: actions/checkout@v4
         with:
-          name: outputs
-          path: |
-            priv/out/*.mp4
-            priv/out/*.mp3
-            priv/out/*.wav
-            priv/out/story.srt
-            priv/out/script.txt
-          if-no-files-found: warn
-          retention-days: 7
+          repository: ${{ steps.params.outputs.repo }}
+          ref: ${{ steps.params.outputs.ref }}
+          path: private-src
+          fetch-depth: 1
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+
+      # KÉO CODE từ repo PRIVATE (SSH)
+      - name: Checkout PRIVATE via SSH Deploy Key
+        if: ${{ steps.auth.outputs.mode == 'ssh' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.params.outputs.repo }}
+          ref: ${{ steps.params.outputs.ref }}
+          path: private-src
+          fetch-depth: 1
+          ssh-key: ${{ secrets.PRIVATE_SSH_KEY }}
+          persist-credentials: false
+
+      - name: Fail if no auth available
+        if: ${{ steps.auth.outputs.mode == 'none' }}
+        run: |
+          echo "::error::Không checkout được repo private. Cần PRIVATE_REPO_TOKEN (PAT) hoặc PRIVATE_SSH_KEY (Deploy key)."
+          exit 1
+
+      - name: Verify PRIVATE checkout
+        working-directory: private-src
+        run: |
+          pwd && ls -la
+          echo "== 20 files in commit =="
+          git ls-tree -r --name-only HEAD | head -n 20
+
+      # Tự tìm thư mục chứa src/main.py (kể cả khi không nhập workdir)
+      - name: Detect script path
+        id: find_script
+        run: |
+          set -e
+          BASE="private-src"
+          DEFAULT="${{ steps.params.outputs.workdir }}"
+          CAND=""
+          if [ -n "$DEFAULT" ] && [ -f "$BASE/$DEFAULT/src/main.py" ]; then
+            CAND="$BASE/$DEFAULT"
+          else
+            CAND=$(cd "$BASE" && find . -type f -path "*/src/main.py" -print -quit | sed 's|^\./||' | xargs -I{} dirname {} )
+            [ -n "$CAND" ] && CAND="$BASE/$CAND"
+          fi
+          if [ -z "$CAND" ]; then
+            echo "::error::Không tìm thấy src/main.py trong repo private."
+            exit 1
+          fi
+          echo "dir=$CAND" >> "$GITHUB_OUTPUT"
+          echo "[FOUND] $CAND"
+
+      
+
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps (ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('private-src/**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python deps
+        run: |
+          set -e
+          REQ=$(ls private-src/**/requirements*.txt 2>/dev/null | head -n1 || true)
+          if [ -n "$REQ" ]; then
+            echo "[INFO] Using requirements: $REQ"
+            pip install -r "$REQ"
+          else
+            echo "[INFO] No requirements*.txt found — install tối thiểu"
+            pip install Pillow opencv-python-headless numpy gdown youtube-transcript-api google-genai tqdm regex \
+                        google-api-python-client google-auth google-auth-httplib2 requests google-generativeai \
+                        imageio-ffmpeg
+          fi
+
+      # CHẠY CODE trong repo PRIVATE (upload YouTube trực tiếp)
+      - name: Run pipeline in PRIVATE
+        working-directory: ${{ steps.find_script.outputs.dir }}
+        run: |
+          set -e
+          python -u src/main.py
+
+      # Commit & PUSH 3 CSV về repo PRIVATE qua PAT (nếu checkout bằng PAT)
+      - name: Commit & push state CSVs back to PRIVATE (PAT)
+        if: ${{ steps.auth.outputs.mode == 'pat' }}
+        working-directory: private-src
+        env:
+          PUSH_TOKEN_1: ${{ secrets.PRIVATE_REPO_PUSH_TOKEN }}
+          PUSH_TOKEN_2: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ steps.params.outputs.repo }}
+          PRIVATE_REF: ${{ steps.params.outputs.ref }}
+          DIR_FOUND: ${{ steps.find_script.outputs.dir }}
+        run: |
+          set -e
+          TOKEN="${PUSH_TOKEN_1:-$PUSH_TOKEN_2}"
+          [ -z "$TOKEN" ] && { echo "::warning::Không có token có quyền ghi. Bỏ qua commit."; exit 0; }
+
+          FILES=""
+          for f in tieudedalay.csv; do
+            [ -f "$f" ] && FILES="$FILES $f"
+            [ -n "$DIR_FOUND" ] && [ -f "$DIR_FOUND/$f" ] && FILES="$FILES $DIR_FOUND/$f"
+          done
+          [ -z "$FILES" ] && { echo "[INFO] Không có CSV để commit."; exit 0; }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${PRIVATE_REPO}.git"
+
+          CURBR=$(git rev-parse --abbrev-ref HEAD || true)
+          [ "$CURBR" = "HEAD" ] && git checkout -b ci-state-update
+
+          git add -- $FILES
+          git diff --cached --quiet && { echo "[INFO] Không có thay đổi."; exit 0; }
+          git commit -m "ci(state): update tieudedalay.csv"
+          git push origin HEAD:"${PRIVATE_REF}"
+
+      # Commit & PUSH 3 CSV về repo PRIVATE qua SSH (nếu checkout bằng SSH)
+      - name: Commit & push state CSVs back to PRIVATE (SSH)
+        if: ${{ steps.auth.outputs.mode == 'ssh' }}
+        working-directory: private-src
+        env:
+          PRIVATE_SSH_KEY: ${{ secrets.PRIVATE_SSH_KEY }}
+          PRIVATE_REPO: ${{ steps.params.outputs.repo }}
+          PRIVATE_REF: ${{ steps.params.outputs.ref }}
+          DIR_FOUND: ${{ steps.find_script.outputs.dir }}
+        run: |
+          set -e
+          [ -z "$PRIVATE_SSH_KEY" ] && { echo "::warning::Thiếu PRIVATE_SSH_KEY. Bỏ qua commit."; exit 0; }
+
+          install -m 700 -d ~/.ssh
+          echo "$PRIVATE_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          eval "$(ssh-agent -s)"
+          ssh-add ~/.ssh/id_deploy
+          printf "Host github.com\n  StrictHostKeyChecking accept-new\n" >> ~/.ssh/config
+
+          FILES=""
+          for f in tieudedalay.csv; do
+            [ -f "$f" ] && FILES="$FILES $f"
+            [ -n "$DIR_FOUND" ] && [ -f "$DIR_FOUND/$f" ] && FILES="$FILES $DIR_FOUND/$f"
+          done
+          [ -z "$FILES" ] && { echo "[INFO] Không có CSV để commit."; exit 0; }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "git@github.com:${PRIVATE_REPO}.git"
+
+          CURBR=$(git rev-parse --abbrev-ref HEAD || true)
+          [ "$CURBR" = "HEAD" ] && git checkout -b ci-state-update
+
+          git add -- $FILES
+          git diff --cached --quiet && { echo "[INFO] Không có thay đổi."; exit 0; }
+          git commit -m "ci(state): update tieudedalay.csv"
+          git push origin HEAD:"${PRIVATE_REF}"
